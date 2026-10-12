@@ -1,0 +1,4 @@
+{
+  "P-102": {"decision": "modify", "billable_hours": 27.5, "note": "Agreed 27.5 h with client after make-ready review"},
+  "P-114": {"decision": "reject", "note": "Units count disputed; hold for re-count"}
+}

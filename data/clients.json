@@ -1,0 +1,10 @@
+{
+  "NLT": {
+    "name": "Northline Telecom (illustrative)",
+    "contract": "contracts/northline_telecom_msa.md",
+    "standard_hours_per_unit": 8.0,
+    "tolerance": 0.15,
+    "complex_threshold": 0.50,
+    "complex_cap_hours_per_unit": 10.0
+  }
+}
