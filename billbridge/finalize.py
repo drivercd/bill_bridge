@@ -28,6 +28,7 @@ def staging_rows(state: RunState) -> list[dict]:
                 "supervisor_decision": record.supervisor_decision,
                 "adjustment_note": record.final_adjustments,
                 "contract_citations": [c["section_id"] for c in citations],
+                "approval": record.approval,
             }
         )
     return rows
@@ -42,6 +43,8 @@ def review_queue_rows(state: RunState) -> list[dict]:
             reason = "; ".join(record.validation_errors)
         elif record.status == "rejected":
             reason = record.final_adjustments or "rejected by supervisor"
+        elif record.status == "escalated" and record.final_adjustments:
+            reason = record.final_adjustments
         elif record.status == "escalated":
             reason = f"AI agent failed {record.retry_count} attempts; needs human review"
         else:
@@ -50,6 +53,7 @@ def review_queue_rows(state: RunState) -> list[dict]:
             {
                 "project_id": record.project_id,
                 "status": record.status,
+                "review_id": record.review_id,
                 "reason": reason,
                 "recommendation": record.recommendation,
             }
@@ -70,6 +74,8 @@ def compute_metrics(state: RunState) -> dict:
         "complex_exceptions": by_type["complex"],
         "escalated": sum(1 for r in records if r.status == "escalated"),
         "approved": sum(1 for r in records if r.status == "approved"),
+        "rejected": sum(1 for r in records if r.status == "rejected"),
+        "human_reviewed": sum(1 for r in records if r.supervisor_decision),
         "auto_clear_rate": round(by_type["none"] / len(valid), 4) if valid else None,
         "model_calls": state.model_calls,
     }

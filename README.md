@@ -5,8 +5,10 @@ AI-assisted billing reconciliation for engineering services: faster, more accura
 BillBridge is the Team 3 Enterprise AI group project (Chad Driver, Jorja Baker, Minh Pham,
 Sao Lognon, Yohanes Teka). It is built around an illustrative case company, **Meridian Engineering
 Services**, which designs fiber routes and pole attachments for telecom and utility clients.
-This repository holds the **Milestone 2 (M2) prototype**: one client, codified billing rules,
-mock data, and a real LLM call for complex exceptions.
+This repository holds the **Milestone 3 (M3) prototype**: the M2 pipeline (one client, codified
+billing rules, mock data, a real LLM call for complex exceptions) plus a human checkpoint,
+an event-driven path, durable state in SQLite, and recovery from interruptions and lost
+acknowledgements. The M3 design and test evidence are in [`docs/m3/`](docs/m3/).
 
 ## The problem
 
@@ -36,6 +38,9 @@ Three design decisions shape the system:
    An output without a valid citation is rejected and retried.
 3. **Human approval for every exception.** Nothing that went through the rules engine or the
    agent is staged for invoicing without a supervisor decision.
+4. **Durable, idempotent execution (M3).** Run state, review items, events and invoice commits
+   live in SQLite. Every event carries an id that is de-duplicated, and every external commit
+   carries an idempotency key saved before the call.
 
 ## Success metrics
 
@@ -72,6 +77,10 @@ prototype auto-clears **85%**. That shows the routing works; it is not a product
                                                                    approve / modify / reject
                                                                                   │
                                                                 11 Finalize & output
+                                                                                  │
+                                                                12 Load draft invoice (M3)
+                                                                   idempotency key; AR manager
+                                                                   signs off before it is sent
 ```
 
 | Step | Actor | What it does | On failure |
@@ -85,8 +94,9 @@ prototype auto-clears **85%**. That shows the routing works; it is not a product
 | 7b. AI exception agent | model | Retrieves contract sections, returns a JSON recommendation with billable hours, explanation, confidence and citations | API error or invalid output: retry |
 | 8. Validate AI output | code | Schema check, required fields, at least one citation to a section that was actually retrieved | Retry with feedback on what was wrong |
 | 9. Retry & fallback | code | Up to 3 attempts per exception | Escalate to human review |
-| 10. Supervisor review | human | Approve, modify (set hours) or reject. Simulated in M2 | No decision: stays in the review queue |
-| 11. Finalize & output | code | Writes staged records, the review queue, metrics, log and checkpoint | n/a |
+| 10. Supervisor review | human | One review item per exception in SQLite; the run pauses (`awaiting_review`). Decisions arrive as events: approve, modify (set hours) or reject | No decision in 48 h: escalated to the AR manager. Nothing is ever auto-approved |
+| 11. Finalize & output | code | Checks each approval is still valid (72 h), writes staged records, review queue, metrics, log and checkpoint | Expired approval: back to review |
+| 12. Load draft invoice | code | Saves the idempotency key and payload hash, then creates one draft invoice in the Invoicing System | 503: retry same key. 504: look up the key before resending. 3 failures or a conflict: held for the AR manager |
 
 ### Billing rules for the M2 client
 
@@ -110,31 +120,39 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # optional; mock mode needs no key
 
-python run_reconciliation.py --billing-period 2026-09
+python -m billbridge run --billing-period 2026-09     # pauses at the human checkpoint
+python -m billbridge review --reviewer "Your name"    # interactive approve / modify / reject
+python -m billbridge invoices                          # what the simulated Invoicing System holds
 ```
 
-Expected summary:
+`python run_reconciliation.py --billing-period 2026-09` still works and is the same as
+`python -m billbridge run`. Add `--simulate-supervisor` for the M2 behavior (every exception
+approved by a simulated supervisor), which gives the M2 summary: 20 projects, 17 auto-cleared,
+2 simple and 1 complex exception, auto-clear rate 0.85, 1 model call.
 
+The full M3 walkthrough (crash and resume, decisions arriving as webhook files with a duplicate
+and a double click, a lost invoicing acknowledgement, and a timeout) is one script:
+
+```bash
+./scripts/demo_m3.sh
 ```
-Run run-xxxxxxxx (mock model): completed
-  projects: 20
-  auto_cleared: 17
-  simple_exceptions: 2
-  complex_exceptions: 1
-  auto_clear_rate: 0.85
-  model_calls: 1
-```
 
-### Options
+### Commands
 
-| Flag | Default | Purpose |
-|---|---|---|
-| `--billing-period` | required | Period to reconcile, `YYYY-MM` |
-| `--project-id` | all | Run a single project, e.g. `P-102` |
-| `--data-dir` | `data` | Source CSVs, client rules and contracts |
-| `--out-dir` | `output` | Where outputs are written |
-| `--llm` | `BILLBRIDGE_LLM_MODE` or `mock` | `mock` (deterministic, no key) or `live` (Anthropic API) |
-| `--decisions` | none | JSON of scripted supervisor decisions, see [`examples/supervisor_decisions.json`](examples/supervisor_decisions.json) |
+| Command | Purpose |
+|---|---|
+| `run --billing-period YYYY-MM [--project-id P] [--run-id R]` | Start a run. Pauses with status `awaiting_review` when there are exceptions |
+| `review --reviewer NAME [--role supervisor\|ar_manager] [--review-id ID --decision approve\|modify\|reject --hours H --note T] [--show]` | The human checkpoint. Without `--decision` it prompts |
+| `event FILE...` / `inbox FOLDER` | Handle event JSON files (simulated webhook), see [`examples/inbox/`](examples/inbox/) |
+| `tick [--now ISO]` | Timer event: expire overdue reviews and escalate them to the AR manager |
+| `resume RUN_ID` | Continue a run from its saved checkpoint |
+| `retry-commit RUN_ID --reviewer NAME` | AR manager releases a held invoice load (same idempotency key) |
+| `status` / `invoices` | Runs, review queue and commits / what the receiving system actually holds |
+
+Every command takes `--out-dir` (default `output`), `--data-dir` (default `data`), `--llm mock|live`
+and `--invoicing-fault unavailable|lost_ack` (inject a fault into the next Invoicing System call).
+`run` also takes `--simulate-crash agent` (the worker dies inside the AI agent step) and
+`--decisions FILE` (scripted decisions, see [`examples/supervisor_decisions.json`](examples/supervisor_decisions.json)).
 
 ### Live model mode
 
@@ -147,47 +165,52 @@ so consistency comes from the schema, the citation check and the retry rules ins
 The live path has been exercised up to the API (a bad key is retried three times, then escalated)
 but has not yet been run end to end with a real key.
 
-## Outputs
+## Outputs and state
 
-Each run writes four files to `--out-dir`:
-
-| File | Contents |
+| File in `--out-dir` | Contents |
 |---|---|
-| `invoicing_staging.json` | Approved records ready for invoicing: recorded vs billable hours, how each was resolved, supervisor decision, contract citations |
-| `review_queue.json` | Everything not staged: invalid records, escalations, rejections, pending reviews, each with a reason |
-| `execution_log.json` | One entry per step and project: timestamp, actor (`code`, `model`, `human`), input and output summaries, status, stop reason, retry attempt and token usage |
-| `state_checkpoint.json` | The full run state after the last completed step. A rerun starts from the beginning; resume-from-checkpoint is planned for M3 |
+| `billbridge.db` | SQLite: `runs` (checkpoint JSON + hash), `review_items`, `events`, `event_receipts`, `invoice_commits`, `execution_log` |
+| `invoicing_system.db` | The simulated Invoicing System's own records (`invoices`, `requests`), used to verify effects |
+| `invoicing_staging.json` | Approved lines with their approval (who, version, expiry) and contract citations |
+| `review_queue.json` | Everything not staged: invalid records, escalations, rejections, pending reviews |
+| `execution_log.json` | JSON export of the run's log: step, timestamp, actor, status, event id, idempotency key, tokens |
+| `state_checkpoint.json` | JSON export of the latest run state (the authoritative copy is in SQLite) |
 
 ## Tests
 
 ```bash
-python -m pytest
+python -m pytest              # 30 tests: the M2 cases plus M3 oversight, events and recovery
+python scripts/m3_cases.py    # the four M3 report cases; writes docs/m3/test_evidence.md
 ```
-
-The tests cover the three M2 test cases and the failure paths:
 
 | Test | Input | Expected |
 |---|---|---|
-| Case 1: clean run | P-101, 40 h, 5 units (8 h/unit) | Auto-cleared, zero model calls |
-| Case 2: complex exception | P-102, 120 h, 3 units (40 h/unit) | Agent cites §4.2 and recommends 30.0 h, confidence 0.82 |
-| Case 3: invalid input | P-102, units missing | Early stop, zero model calls, supervisor notified |
-| Retry then success | Two scripted model failures | Approved on attempt 3 |
-| Retry exhaustion | Three scripted model failures | Escalated to human, not staged |
-| Plus | Rules engine, modify/reject, missing file, bad period, duplicate entries, invented citation | See [`tests/test_workflow.py`](tests/test_workflow.py) |
+| M2 case 1: clean run | P-101, 40 h, 5 units (8 h/unit) | Auto-cleared, zero model calls |
+| M2 case 2: complex exception | P-102, 120 h, 3 units (40 h/unit) | Agent cites §4.2 and recommends 30.0 h, confidence 0.82 |
+| M2 case 3: invalid input | P-102, units missing | Early stop, zero model calls, supervisor notified |
+| M3 case 1: approved run | Approvals arrive in a new process | One draft invoice in the receiver, P-102 at 30.0 h |
+| M3 case 2: rejection / timeout | Reject P-102; or no decision for 49 h | Line withheld; or escalated to AR manager, late approval refused, no invoice |
+| M3 case 3: duplicates and retry | Same event 3 times, double click, a 503, period-close twice | One effect, one invoice, one idempotency key, one run |
+| M3 case 4: crash and lost ack | Worker dies in the agent step; 504 after the invoice was created | Resume skips finished steps, no duplicate review items; lookup binds to the existing invoice |
+| Plus | Stale version, unknown event, unauthorized role, approval expiry, half-processed event, duplicate period | See [`tests/test_m3_oversight.py`](tests/test_m3_oversight.py) |
 
 ## Repository layout
 
 ```
 run_reconciliation.py        CLI entry point
 billbridge/
-  workflow.py                Fixed-sequence orchestration (steps 1–11)
+  __main__.py                M3 command line (run, review, event, inbox, tick, resume, ...)
+  workflow.py                Fixed-sequence orchestration, phases, checkpoint/resume, invoice commit
+  events.py                  Event handler: de-duplication, late/stale/unknown checks, timer
+  store.py                   SQLite state: runs, review queue, events, commits, execution log
+  invoicing_sim.py           Simulated Invoicing System (idempotency keys, fault injection)
   loader.py                  Step 2: CSV and client-rule loading
   validation.py              Step 3: validation and hours-to-units matching
   detection.py               Step 4: none / simple / complex classification
   rules_engine.py            Step 7a: rules for simple exceptions
   contracts.py               Mock contract lookup (keyword retrieval over contract Markdown)
   agent.py                   Steps 7b–9: AI agent, output schema, validation, retry
-  review.py                  Step 10: simulated supervisor
+  review.py                  Step 10: review proposal, conflict checks, reviewer view, simulated supervisor
   finalize.py                Step 11: staging, review queue, metrics
   state.py, audit.py         Run state, checkpoint and execution log
 data/
@@ -195,7 +218,9 @@ data/
   units.csv                  Mock units (20 projects)
   clients.json               Per-client billing rules
   contracts/                 Mock contract documents
-examples/                    Sample supervisor decisions
+examples/                    Sample supervisor decisions and event files (inbox = simulated webhook)
+scripts/                     demo_m3.sh walkthrough, m3_cases.py report evidence
+docs/m3/                     M3 design notes, decision records, diagrams, test evidence
 tests/                       End-to-end tests
 ```
 
@@ -208,19 +233,19 @@ All data is synthetic. No real HR, client or contract data is used.
 | Input trigger, data loader, validation and matching | Implemented |
 | Exception detection, rules engine | Implemented |
 | AI exception agent (Anthropic API) | Implemented; live run with a real key not yet verified |
-| JSON schema validation, citation check, retry and escalation | Implemented |
+| Schema validation, citation check, hours and quote safety bounds, retry and escalation | Implemented |
 | Contract lookup | Implemented with mock local files |
-| Supervisor review | Simulated |
-| Finalize, outputs, execution log, checkpoint | Implemented |
+| Human checkpoint (review item with evidence, rule, conflicts, version, expiry) | Implemented, command-line prompt |
+| Event handling (decision, timer, period close, commit retry) with de-duplication | Implemented; events from CLI and JSON files |
+| Durable state and resume from checkpoint | Implemented (SQLite) |
+| Invoice load with idempotency key, lookup after uncertain outcome | Implemented against a simulated Invoicing System |
 | Time-tracking, units and contract data | Mock |
+| Review web UI, notifications, Chroma index, monitoring dashboard | Planned |
 
-## Roadmap (M3)
+## Roadmap (M4 and beyond)
 
-- Replace the keyword contract lookup with a Chroma vector index over contract Markdown.
-- Build an interactive supervisor review UI (Streamlit or notebook).
-- Expand mock data to 100+ projects across 3 clients.
-- Handle provider timeouts separately from schema failures.
-- Build a labeled set of 20+ contract clauses to measure citation accuracy, then measure
-  auto-clear rate, supervisor override rate and citation accuracy on the larger set.
-- Resume a stopped run from its checkpoint.
-- Integrate with the invoicing system and add an audit dashboard.
+- Governance, security and risk assessment (M4).
+- Build a labeled set of 20+ complex cases to measure citation accuracy and calibrate confidence.
+- Replace the command-line checkpoint with a web review UI with SSO roles.
+- Replace SQLite with managed PostgreSQL and the keyword lookup with a Chroma index.
+- Run the live model path end to end with a real key and record cost and latency per call.

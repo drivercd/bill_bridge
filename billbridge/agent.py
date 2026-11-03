@@ -174,7 +174,7 @@ class MockLLM:
             "recommendation": f"Cap billable hours at {billable} and attach make-ready justification.",
             "recommended_billable_hours": billable,
             "confidence": 0.82,
-            "citations": [{"section_id": section["section_id"], "quote": section["text"][:160]}],
+            "citations": [{"section_id": section["section_id"], "quote": section["text"].split(". ")[0]}],
         }
 
 
@@ -216,8 +216,18 @@ def build_context(record: ProjectRecord, rules: dict, sections: list[ContractSec
     }
 
 
-def validate_output(text: str, allowed_sections: set[str]) -> AgentRecommendation:
-    """Step 8: schema check, required fields, and a citation to a retrieved section."""
+def validate_output(
+    text: str,
+    allowed_sections: set[str],
+    max_hours: float | None = None,
+    section_text: dict[str, str] | None = None,
+) -> AgentRecommendation:
+    """Step 8: schema check, required fields, and a citation to a retrieved section.
+
+    M3 adds two safety bounds raised in the reliability review: the hours may
+    not exceed what was recorded or the contract hard cap (`max_hours`), and a
+    quote must appear verbatim in the section it cites (`section_text`).
+    """
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -230,6 +240,16 @@ def validate_output(text: str, allowed_sections: set[str]) -> AgentRecommendatio
     unknown = [c.section_id for c in result.citations if c.section_id not in allowed_sections]
     if unknown:
         raise ValueError(f"citations reference sections that were not retrieved: {unknown}")
+    if max_hours is not None and result.recommended_billable_hours > max_hours + 1e-9:
+        raise ValueError(
+            f"recommended_billable_hours {result.recommended_billable_hours} exceeds the allowed maximum {max_hours} "
+            "(recorded hours or contract hard cap)"
+        )
+    if section_text is not None:
+        squash = lambda t: " ".join(t.split()).lower().rstrip(".")  # noqa: E731
+        for c in result.citations:
+            if squash(c.quote) not in squash(section_text.get(c.section_id, "")):
+                raise ValueError(f"quote for section {c.section_id} is not found verbatim in that section")
     return result
 
 
@@ -244,6 +264,10 @@ class ExceptionAgent:
         sections = self.contracts.retrieve(record.client_id, query, k=config.CONTRACT_SECTIONS_TO_RETRIEVE)
         context = build_context(record, rules, sections)
         allowed = {s.section_id for s in sections}
+        section_text = {s.section_id: s.text for s in sections}
+        max_hours = None
+        if record.hours is not None and record.units:
+            max_hours = min(record.hours, round(record.units * rules["complex_cap_hours_per_unit"], 2))
         base_prompt = (
             "Reconcile this project and recommend billable hours.\n\n"
             f"{json.dumps(context, indent=2)}"
@@ -255,7 +279,7 @@ class ExceptionAgent:
             prompt = base_prompt + feedback
             try:
                 response = self.llm.complete(SYSTEM_PROMPT, prompt, context)
-                recommendation = validate_output(response.text, allowed)
+                recommendation = validate_output(response.text, allowed, max_hours, section_text)
             except TransientModelError as exc:
                 attempts.append(AgentAttempt(number, False, f"transient model error: {exc}"))
                 continue
@@ -270,3 +294,25 @@ class ExceptionAgent:
             attempts.append(AgentAttempt(number, True, usage=response.usage))
             return AgentResult(recommendation, attempts, sections)
         return AgentResult(None, attempts, sections)
+
+
+class WorkerCrash(Exception):
+    """Fault injection: the worker process dies while the agent is running."""
+
+
+class CrashingLLM:
+    """Wraps an LLM and simulates the worker dying on the first call."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.crashed = False
+
+    @property
+    def calls(self):
+        return getattr(self.inner, "calls", 0)
+
+    def complete(self, system: str, user: str, context: dict) -> LLMResponse:
+        if not self.crashed:
+            self.crashed = True
+            raise WorkerCrash(f"simulated worker crash while the agent processed {context['project']['project_id']}")
+        return self.inner.complete(system, user, context)
