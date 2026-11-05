@@ -79,11 +79,11 @@
 <h3>The implemented checkpoint</h3>
 <div class="two">
 <div>
-<p><b>When.</b> Only for exceptions: in the mock period 3 of 20 projects (P-102 complex; P-107 and P-114 simple). Clean projects bypass it.</p>
-<p><b>Who.</b> The billing supervisor decides within 48 hours. If no decision arrives, the timer escalates the item to the <b>AR manager</b>, who is the only role allowed to decide escalated items and to release a held invoice load. Roles are checked on every decision event.</p>
-<p><b>What the reviewer sees</b> (example below, from <code>python -m billbridge review --show</code>): the proposed action and what it does not authorize, the evidence (hours, units, ratio, variance), the applicable clause with its quote, conflicts that code detected, the content version and the expiry.</p>
-<p><b>What approval authorizes.</b> Action: stage this line on the period's draft invoice. Target: run, period, client and project. Content version: a 12-character hash of the proposal; a decision on any other version is refused as stale. Hours: the proposed value, or the reviewer's value for <i>modify</i> (between 0 and recorded hours). Expiry: the approval must be executed within 72 hours or the item reopens for review. It does not authorize sending the invoice, changing rates or changing billing rules.</p>
-<p><b>After the decision.</b> <i>Approve or modify:</i> recorded with reviewer, role, time and event id; when every item is decided the run finalizes and loads the draft invoice. <i>Reject:</i> the line is withheld, listed in the review queue with the reason, and the rest of the invoice proceeds. <i>Timeout:</i> nothing is staged, the item escalates to the AR manager, the run keeps waiting, and a late supervisor decision is refused.</p>
+<p><b>When.</b> Only exceptions: 3 of 20 mock projects (P-102 complex; P-107 and P-114 simple).</p>
+<p><b>Who.</b> The billing supervisor, within 48 hours. After that the item escalates to the <b>AR manager</b>, the only role that can decide escalated items or release a held invoice load.</p>
+<p><b>What the supervisor sees on the command line.</b> The supervisor runs <code>python -m billbridge review --reviewer "&lt;name&gt;"</code> in a terminal (CLI, command-line interface). BillBridge prints one screen per exception, shown at right for P-102, and waits for a one-letter answer.</p>
+<p><b>What approval authorizes.</b> Staging one line on the period's draft invoice at the proposed hours (or the reviewer's, between 0 and recorded hours), bound to the 12-character content version and valid for 72 hours. It does not authorize sending the invoice or changing rates or billing rules.</p>
+<p><b>After the decision.</b> <i>Approve or modify:</i> logged; once every item is decided, the draft invoice loads. <i>Reject:</i> the line is withheld and the rest proceeds. <i>Timeout:</i> nothing is staged, the item escalates to the AR manager, and a late supervisor decision is refused.</p>
 </div>
 <div>
 <pre>==========================================================================
@@ -117,7 +117,7 @@ CONFLICTS
   (no labeled set yet).
 ==========================================================================
 [a]pprove  [m]odify  [r]eject  [s]kip &gt;</pre>
-<p class="note">Figure 2. Reviewer view for P-102 (mock model). The conflict line is computed by code, not by the model.</p>
+<p class="note">Figure 2. Exactly what the supervisor sees in the terminal for P-102 (mock model). The conflict line is computed by code, not by the model.</p>
 </div>
 </div>
 
