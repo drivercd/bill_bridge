@@ -9,9 +9,13 @@ from .state import utc_now
 
 
 class ExecutionLog:
-    def __init__(self, run_id: str):
+    """Appends each entry to the SQLite store as it happens (M3) and keeps the
+    JSON export from M2. On resume the entries are reloaded from the store."""
+
+    def __init__(self, run_id: str, store=None):
         self.run_id = run_id
-        self.entries: list[dict] = []
+        self.store = store
+        self.entries: list[dict] = store.log_entries(run_id) if store else []
 
     def log(
         self,
@@ -39,6 +43,8 @@ class ExecutionLog:
             entry["stop_reason"] = stop_reason
         entry.update(extra)
         self.entries.append(entry)
+        if self.store is not None:
+            self.store.append_log(entry)
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(self.entries, indent=2))

@@ -1,0 +1,10 @@
+{
+  "event_id": "webhook-0002",
+  "type": "review.decision",
+  "review_id": "RV-demo0001-P-102",
+  "content_version": "39b4b358e145",
+  "decision": "reject",
+  "reviewer": "billing supervisor (demo)",
+  "role": "supervisor",
+  "note": "second click from another tab"
+}

@@ -9,8 +9,11 @@ from billbridge.workflow import Workflow
 
 
 def run(data_dir, out_dir, project_id=None, llm=None, supervisor=None, period="2026-09"):
+    # M2 behavior: a simulated supervisor approves by default. In M3 the
+    # default with no supervisor is to pause at the human checkpoint.
     llm = llm or MockLLM()
-    state = Workflow(data_dir, out_dir, llm, supervisor).run(period, project_id)
+    supervisor = supervisor or SimulatedSupervisor()
+    state = Workflow(data_dir, out_dir, llm, supervisor, sleep=lambda s: None).run(period, project_id)
     return state, llm
 
 

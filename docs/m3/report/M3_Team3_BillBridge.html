@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>M3 Team 3 BillBridge</title>
+<style>
+  @page { size: Letter; margin: 0.5in 0.55in 0.55in 0.55in; }
+  :root { --ink:#1f2937; --muted:#4b5563; --accent:#0f766e; --rule:#d1d5db; --tint:#f3f7f6; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 8.9pt; line-height: 1.32; color: var(--ink); background:#fff; margin:0; }
+  h1 { font-size: 17pt; margin: 0 0 2px; }
+  h2 { font-size: 12.5pt; margin: 14px 0 5px; color: var(--accent); border-bottom: 1px solid var(--rule); padding-bottom: 2px; }
+  h3 { font-size: 10.5pt; margin: 10px 0 4px; }
+  p { margin: 4px 0 6px; }
+  .sub { color: var(--muted); margin-bottom: 8px; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 6px; font-size: 7.9pt; page-break-inside: auto; }
+  tr { page-break-inside: avoid; }
+  th, td { border: 1px solid var(--rule); padding: 2px 4px; vertical-align: top; text-align: left; }
+  th { background: var(--tint); font-weight: 600; }
+  td.k { font-weight: 600; }
+  .fig { text-align: center; margin: 6px 0 4px; page-break-inside: avoid; }
+  .fig img { width: 100%; }
+  .cap { font-size: 8.4pt; color: var(--muted); text-align: center; margin-bottom: 8px; }
+  pre { font-family: Menlo, Consolas, monospace; font-size: 6.8pt; line-height: 1.25; background: #f8fafc; border: 1px solid var(--rule); padding: 6px 8px; white-space: pre-wrap; margin: 5px 0 8px; page-break-inside: avoid; }
+  code { font-family: Menlo, Consolas, monospace; font-size: 8.4pt; }
+  .ph { background: #fff4d6; padding: 0 3px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .pass { color: #0f766e; font-weight: 700; }
+  .note { font-size: 8.6pt; color: var(--muted); }
+  ul { margin: 3px 0 6px 18px; padding: 0; } li { margin: 1px 0; }
+  .pb { page-break-before: always; }
+</style>
+</head>
+<body>
+
+<h1>BillBridge: Milestone 3, Human Oversight and Reliable Execution</h1>
+<div class="sub">Team 3 · Enterprise AI Group Project · Repository: <code>github.com/drivercd/bill_bridge</code> (code in <code>billbridge/</code>, design in <code>docs/m3/</code>) · All data is synthetic</div>
+
+<h2>1. What changed since Milestone 2</h2>
+<p>M2 ran the reconciliation pipeline end to end in one process, with a simulated supervisor that approved every exception by default and a checkpoint file written only for audit. M3 makes the pipeline safe to pause and resume. A run now stops at a <b>human checkpoint</b> when there are exceptions, keeps its state in <b>SQLite</b> instead of process memory, continues when a <b>decision event</b> arrives (from a new process if need be), and loads one <b>draft invoice</b> into a simulated Invoicing System using an idempotency key that is saved before the call. The deterministic steps, the bounded agent and the M2 numbers are unchanged: the mock period still auto-clears 17 of 20 projects (85%), and P-102 is still capped at 30.0 h citing §4.2.</p>
+<table>
+<tr><th style="width:24%">Change</th><th style="width:44%">Why</th><th>Feedback or finding it addresses</th></tr>
+<tr><td>Simulated supervisor no longer approves by default; a run pauses with status <code>awaiting_review</code></td><td>An exception reaching the invoice without a person deciding defeats M1 Decision 3</td><td>Team reliability review (16 Oct): the default approval in <code>review.py</code> let any recommendation through</td></tr>
+<tr><td>Reviewer sees conflicts computed by code, e.g. §4.2 vs §4.1 for P-102</td><td>A cited, confident recommendation can still rest on one of two readings of the contract</td><td>Reliability review: P-102's 30.0 h needs make-ready justification that the data does not contain; the §4.1 reading gives 27.6 h</td></tr>
+<tr><td>Agent output must not exceed recorded hours or the contract hard cap, and quotes must be verbatim</td><td>The M2 validator accepted a 120 h answer with an invented quote at 0.99 confidence</td><td>Reliability review, safety dimension</td></tr>
+<tr><td>Durable state, per-project checkpoint, resume</td><td>M2 restarted from the beginning after any stop</td><td>M2 §3.2 listed resume-from-checkpoint as planned for M3</td></tr>
+<tr><td>Invoicing System integration (simulated) with idempotency and lookup</td><td>Loading the invoice is the first action with an effect outside BillBridge</td><td>M2 status table: invoicing integration planned; team recovery-path design (Condition 2)</td></tr>
+<tr><td>Escalation owner named: AR manager</td><td>Owns billing rules and signs invoices; the supervisor reviews exceptions</td><td>Team clarification of roles (23 Oct)</td></tr>
+</table>
+<p class="note"><span class="ph">[Team: add the instructor's written M2 feedback here and say which change answers it.]</span> We did not have it in the project files when this draft was written.</p>
+
+<h2>2. Updated architecture</h2>
+<div class="fig"><img src="../diagrams/component.svg" alt="Component diagram" style="width:74%"><div class="cap">Figure 1. Component view. Solid = implemented, dashed = simulated, dotted = planned; tinted boxes are new or changed in M3. The human checkpoint, the event sources (CLI decisions, inbox files as a simulated webhook, the timer, the period-close signal), the SQLite state store and the system boundary are shown. The LLM provider is real but defaults to the mock; the Invoicing System is a simulated receiver with its own database.</div></div>
+
+<h3>Design decision records (two updated from M2, three new in M3)</h3>
+<table>
+<tr><th style="width:12%">Decision</th><th style="width:22%">Rationale</th><th style="width:15%">Alternative</th><th style="width:22%">Trade-off</th><th>Evidence (M3)</th></tr>
+<tr><td class="k">D3 (updated) Every exception needs a human decision; nothing is auto-approved, even on timeout</td><td>Billing is a financial control point; confidence is uncalibrated</td><td>Auto-approve high-confidence items; or approve on timeout</td><td>Supervisor time and a 48 h wait per exception; the AR manager becomes a second queue</td><td>3 of 20 projects reach the checkpoint. A 49 h-old item escalated to the AR manager and a late supervisor approval was refused (case 2b); zero invoices until a decision</td></tr>
+<tr><td class="k">D2 (updated) Recommendations must cite retrieved clauses and pass safety bounds</td><td>Citations alone did not stop wrong answers</td><td>Shape-only validation (M2)</td><td>A legitimate change-order above the cap is refused and goes to a person</td><td>Validator now rejects 120 h and a non-verbatim quote (unit test); P-102 conflict shown to the reviewer</td></tr>
+<tr><td class="k">D4 (new) Durable run state in SQLite, checkpoint after every step and every project; resume instead of restart</td><td>A pending review can wait days; a crash must not repeat model calls or extraction</td><td>Restart from the beginning (M2); or a workflow engine such as Temporal</td><td>Hand-written phases and single-writer SQLite; a real deployment moves to PostgreSQL</td><td>Worker killed inside the agent step: resume skipped load and validation (load ran once), made 1 model call, created exactly 3 review items; a further resume changed nothing (case 4a)</td></tr>
+<tr><td class="k">D5 (new) Every event has an id recorded before it is applied; every external commit has an idempotency key saved before the call; after an uncertain outcome, look up before resending</td><td>Webhooks redeliver, people double-click, and a 504 does not mean the invoice was not created</td><td>Retry blindly; or send at most once and ask a person on any error</td><td>Needs a receiver that honours keys and supports lookup; a held commit waits for the AR manager</td><td>Same event 3 times and a double click: one effect. 503 then success: one key, one invoice. 504 after creation: lookup bound to the existing invoice, receiver count 1 (cases 3, 4b)</td></tr>
+<tr><td class="k">D6 (new) Approval is bound to one line, one content version and a 72 h execution window; BillBridge loads a <i>draft</i> and the AR manager signs the invoice before it is sent</td><td>An approval must not authorize content the reviewer did not see, or be used weeks later</td><td>One approval for the whole invoice inside BillBridge (team Checkpoint 2 design)</td><td>Two places to look (BillBridge and the invoicing system); BillBridge cannot prove the send-time sign-off happened</td><td>A decision on an old version is refused as stale; approvals older than 72 h at load time are reopened for review (tests)</td></tr>
+</table>
+
+<h2>3. Human oversight design</h2>
+<h3>Oversight approach for each action with an effect</h3>
+<table>
+<tr><th style="width:24%">Action</th><th style="width:10%">Effect</th><th style="width:16%">Approach</th><th>Justification (stakes and reversibility)</th></tr>
+<tr><td>Read time-tracking, units and contract files</td><td>none</td><td>No human review</td><td>Read-only; a failed read stops the run and notifies the supervisor</td></tr>
+<tr><td>Send project figures and clauses to the LLM provider</td><td>spends money; data leaves</td><td>Monitoring with intervention</td><td>About $0.03 per call (section 6); only project figures and contract text, no personal data. A gateway budget cap and per-run token log let an operator stop spend</td></tr>
+<tr><td>Stage an auto-cleared line (within ±15%)</td><td>changes a record</td><td>Later audit</td><td>Deterministic rule, billed as recorded per §4.1; still only a draft until AR sign-off. Monthly sample audit</td></tr>
+<tr><td>Stage a rules-engine adjustment (simple exception)</td><td>changes billed amount</td><td><b>Approval before execution</b></td><td>Changes the amount the client pays; M1 Decision 3. Low effort to review (one rule, one citation)</td></tr>
+<tr><td>Stage an AI-recommended adjustment (complex exception)</td><td>changes billed amount</td><td><b>Approval before execution</b> (implemented checkpoint)</td><td>Highest stakes per line and the model can be confidently wrong; reversible only by credit memo once sent</td></tr>
+<tr><td>Load the draft invoice into the Invoicing System</td><td>changes another system</td><td>Monitoring with intervention</td><td>Automatic once every line is authorized; idempotent; a draft can be voided; totals checked against staging; held loads go to the AR manager</td></tr>
+<tr><td>Send the invoice to the client</td><td>sends; money</td><td>Approval before execution (AR manager, in the invoicing system)</td><td>Hard to reverse; outside BillBridge and unchanged from today's process</td></tr>
+<tr><td>Change a client billing rule (memory record)</td><td>changes a rule for all future runs</td><td>Approval before execution (AR manager only)</td><td>Affects every later invoice; the agent can cite rules but never write them</td></tr>
+<tr><td>Notify supervisor or AR manager; escalate on timeout</td><td>internal message</td><td>No human review</td><td>Low stakes; the escalation is itself the human route</td></tr>
+</table>
+
+<h3>The implemented checkpoint</h3>
+<div class="two">
+<div>
+<p><b>When.</b> Only exceptions: 3 of 20 mock projects (P-102 complex; P-107 and P-114 simple).</p>
+<p><b>Who.</b> The billing supervisor, within 48 hours. After that the item escalates to the <b>AR manager</b>, the only role that can decide escalated items or release a held invoice load.</p>
+<p><b>What the supervisor sees on the command line.</b> The supervisor runs <code>python -m billbridge review --reviewer "&lt;name&gt;"</code> in a terminal (CLI, command-line interface). BillBridge prints one screen per exception, shown at right for P-102, and waits for a one-letter answer.</p>
+<p><b>What approval authorizes.</b> Staging one line on the period's draft invoice at the proposed hours (or the reviewer's, between 0 and recorded hours), bound to the 12-character content version and valid for 72 hours. It does not authorize sending the invoice or changing rates or billing rules.</p>
+<p><b>After the decision.</b> <i>Approve or modify:</i> logged; once every item is decided, the draft invoice loads. <i>Reject:</i> the line is withheld and the rest proceeds. <i>Timeout:</i> nothing is staged, the item escalates to the AR manager, and a late supervisor decision is refused.</p>
+</div>
+<div>
+<pre>==========================================================================
+REVIEW RV-demo0001-P-102   project P-102   client NLT   period 2026-09
+status: pending   decided by: supervisor   content version: 39b4b358e145
+expires: 2026-11-05T02:26:10+00:00
+--------------------------------------------------------------------------
+PROPOSED ACTION
+  Stage 30.0 billable hours on the draft invoice (source: ai_agent).
+  Approval does NOT authorize: sending the invoice to the client,
+  changing rates, or changing client billing rules.
+EVIDENCE
+  recorded 120.0 h for 3 pole_attachment units = 40.0 h/unit
+  vs 8.0 standard (+400%)
+  complex exception: overrun +400% vs standard, beyond the capped band
+  explanation: Recorded 120.0 h for 3 units (40.0 h/unit) far exceeds
+  the 8.0 h/unit standard. Section 4.2 allows billing up to 10.0 h/unit
+  for complex make-ready work with supervisor approval; hours above
+  that are absorbed.
+  confidence: 0.82
+APPLICABLE RULE
+  §4.2: "Where field conditions require make-ready engineering beyond
+  standard scope (for example, pole replacement, crowded communication
+  space, or utility-requested redesign), hours may be billed above the
+  standard up to a cap of 10.0 hours per unit"
+CONFLICTS
+  ! §4.2 (make-ready, up to 10.0 h/unit) applies only with documented
+    make-ready justification, and the source data contains none.
+    Without it, §4.1 caps billing at 27.6 h (2.4 h less).
+  note: Confidence is self-reported by the model and is not calibrated
+  (no labeled set yet).
+==========================================================================
+[a]pprove  [m]odify  [r]eject  [s]kip &gt;</pre>
+<p class="note">Figure 2. Exactly what the supervisor sees in the terminal for P-102 (mock model). The conflict line is computed by code, not by the model.</p>
+</div>
+</div>
+
+<h2>4. Event handling and saved state</h2>
+<p><b>Event path.</b> Decisions arrive as <code>review.decision</code> events from the CLI prompt or as JSON files dropped in an inbox folder (a simulated webhook, <code>examples/inbox/</code>). Other events: <code>timer.tick</code> (expire overdue reviews), <code>run.requested</code> (period close) and <code>commit.retry</code> (AR manager releases a held load). The handler records the event id in SQLite <i>before</i> acting, checks it against saved state, applies it with a compare-and-set on the review status, then resumes the run from its checkpoint.</p>
+<p><b>Saved state</b> (<code>billbridge.db</code>): <code>runs</code> (full run state as JSON plus a SHA-256 that is verified on load; saved after every step and every project), <code>review_items</code> (unique per run and project), <code>events</code> and <code>event_receipts</code> (every delivery, including duplicates), <code>invoice_commits</code> (idempotency key, payload hash, status, attempts, external invoice id) and <code>execution_log</code>. Nothing needed to resume is held only in memory.</p>
+<div class="fig"><img src="../diagrams/state.svg" alt="State diagram" style="width:82%"><div class="cap">Figure 3. Run and review-item states, including waiting (<code>awaiting_review</code>), failure (<code>stopped</code>, <code>interrupted</code>, outcome unknown) and escalation (escalated item, <code>commit_held</code>).</div></div>
+<table>
+<tr><th style="width:15%">Current state</th><th style="width:19%">Event or observation</th><th style="width:30%">Check before acting</th><th style="width:15%">Next state</th><th>Effect / evidence saved</th></tr>
+<tr><td>exceptions</td><td>project finished</td><td>none</td><td>exceptions (next project)</td><td>checkpoint with hash</td></tr>
+<tr><td>exceptions</td><td>worker crash in agent call</td><td>on resume: hash intact; project marked <code>agent: in_progress</code>?</td><td>interrupted → exceptions</td><td>partial work discarded and logged; finished projects skipped</td></tr>
+<tr><td>exceptions</td><td>all projects done</td><td>review item already exists for run + project?</td><td>awaiting_review</td><td>one item per exception (unique key)</td></tr>
+<tr><td>awaiting_review</td><td>review.decision</td><td>event id new? item pending? within window? role allowed? version current? hours in range?</td><td>awaiting_review or finalize</td><td>decision, reviewer, role, event id, authorized hours, approval expiry</td></tr>
+<tr><td>awaiting_review</td><td>timer.tick past expiry</td><td>item still pending?</td><td>awaiting_review (item escalated)</td><td>AR manager notified; nothing staged</td></tr>
+<tr><td>finalize</td><td>all items decided</td><td>every approval younger than 72 h?</td><td>commit pending, or back to review</td><td>staging and review-queue exports</td></tr>
+<tr><td>commit pending</td><td>about to call the API</td><td>key and payload hash saved? another commit for this period?</td><td>commit pending, or held</td><td>key, hash, attempt count</td></tr>
+<tr><td>commit pending</td><td>201 created, or 200 replay</td><td>invoice total and line count equal staging?</td><td>completed, or held</td><td>external invoice id, how it was bound</td></tr>
+<tr><td>commit pending</td><td>504 / socket drop</td><td>do not assume failure; keep the same key</td><td>outcome unknown</td><td>error and time</td></tr>
+<tr><td>outcome unknown</td><td>retry</td><td>look up the key first; found → bind, not found → resend same key and payload</td><td>completed or outcome unknown</td><td>lookup result</td></tr>
+<tr><td>any commit state</td><td>3 failed attempts, or 409 conflict</td><td>no new key is ever issued</td><td>commit_held</td><td>AR manager notified with evidence</td></tr>
+<tr><td>commit_held</td><td>commit.retry by AR manager</td><td>role is AR manager; run is held</td><td>outcome unknown (lookup first)</td><td>who released it</td></tr>
+</table>
+<p><b>Duplicate events.</b> A repeated event id has no effect and is logged as a duplicate. A second decision with a new id for an item that is already decided (a double click, another tab) is ignored, and the first decision stands. A second period-close signal starts no second run, and a second run for an already-invoiced period is held rather than creating another invoice. <b>Late events.</b> A decision after the review window is refused and the item escalates. An approval that is not executed within 72 hours is reopened. <b>Unexpected events.</b> Unknown types, unknown review ids, unknown roles, stale versions and out-of-range hours are refused and logged, and state does not change. If the process dies after recording an event but before applying it, the redelivered event is finished, not dropped as a duplicate. <b>Safe retries.</b> Model calls retry up to 3 times (no external effect). Invoice loads retry up to 3 times with the same key and backoff (2, 4, 8 s). <b>Success with lost confirmation.</b> BillBridge treats a 504 as unknown, looks the key up in the receiver, and binds to the invoice that already exists.</p>
+
+<h2>5. Test results</h2>
+<p>Every case runs on a fresh copy of the mock data and fresh databases (<code>python scripts/m3_cases.py</code>; output in <code>docs/m3/test_evidence.md</code>). Effects are counted in the simulated Invoicing System's own database, not in BillBridge's records. The full suite (<code>python -m pytest</code>) has 30 tests: 12 from M2, all still passing, and 18 for M3.</p>
+<table>
+<tr><th style="width:11%">Case</th><th style="width:20%">Input</th><th style="width:18%">Expected</th><th style="width:24%">Actual</th><th style="width:15%">Evidence</th><th>Interpretation</th></tr>
+<tr><td class="k">1. Approved run <span class="pass">PASS</span></td><td>Period 2026-09, 20 projects. Supervisor approves P-102 (30.0 h), P-107, P-114 via decision events handled by a <i>new</i> process</td><td>Pause with 3 items, 0 invoices; then 1 draft invoice, 20 lines, P-102 = 30.0 h</td><td>Paused with 3 items and 0 invoices. After approvals: completed; receiver holds 1 invoice, 20 lines, 863.5 h, P-102 = 30.0 h</td><td>Receiver <code>invoices</code> table; approval record with version and expiry</td><td>The pending review survived the process; the authorized action happened once</td></tr>
+<tr><td class="k">2. Rejection and timeout <span class="pass">PASS</span></td><td>(a) Reject P-102, approve the others. (b) P-102 only, no decision; timer at +49 h; then a late approval</td><td>(a) Invoice has 19 lines, no P-102; P-102 in queue as rejected. (b) Escalated to AR manager, no invoice, late approval refused</td><td>(a) P-102 rejected; 19 lines; P-102 absent. (b) Tick escalated P-102 to <code>ar_manager</code>; late approval rejected; 0 invoices; run still waiting</td><td>Review queue export; receiver count; event outcome</td><td>Withheld actions stay withheld; timeout escalates instead of approving</td></tr>
+<tr><td class="k">3. Duplicate event and retry <span class="pass">PASS</span></td><td>Event <code>webhook-7f3a</code> 3 times (2 processes); a second approval with a new id; one 503 from the API; period-close event twice</td><td>One decision applied; one key; one invoice; one run</td><td>applied, duplicate, duplicate, ignored; requests: 503 then 201 on one key; 1 invoice. Period close: applied, duplicate; 1 run, 1 invoice</td><td><code>event_receipts</code>; receiver <code>requests</code> log</td><td>Repetition caused no extra effect at either the event or the API level</td></tr>
+<tr><td class="k">4. Interruption and uncertain outcome <span class="pass">PASS</span></td><td>(a) Worker dies inside the agent call for P-102; resume in a new worker; resume again. (b) The API creates the invoice but the reply is lost (504)</td><td>(a) Finished steps skipped, 1 model call, 3 review items. (b) Lookup before resend; 1 invoice</td><td>(a) Load step ran once in total; 1 model call on resume; 3 items after two resumes. (b) Requests: "201 created, ack lost (504)", then "lookup: found"; bound; 1 invoice</td><td>Execution log; <code>review_items</code>; receiver requests</td><td>Recovery uses saved state and checks the receiver before acting</td></tr>
+</table>
+<p><b>Failures we hit and what we did.</b> Our first version of case 3 failed: we sent the period-close event to the same system where the P-102 run had already invoiced September, and BillBridge held the new run instead of loading a second invoice. The guard was correct and the test was wrong, so we moved that part to a clean system and kept a separate test that the guard holds a second run for an invoiced period. Not yet tested: the live model path with a real API key (the mock is used in every case above), and concurrent workers on one database.</p>
+
+<h2>6. Production operation and cost</h2>
+<div class="fig"><img src="../diagrams/deployment.svg" alt="Deployment view" style="width:80%"><div class="cap">Figure 4. Proposed deployment. Workers and the review app run as containers inside Meridian's cloud account; state moves from SQLite to managed PostgreSQL with the same tables; logs and metrics go to the cloud's log service. Only the exception agent's prompt leaves the network (to the Anthropic API); invoices go to the Invoicing System API.</div></div>
+
+<h3>Cost model</h3>
+<p><b>Volume assumption</b> (stated, not measured): 3 clients, 600 projects per month. Exception mix taken from the mock period: 10% simple, 5% complex, so 60 simple and 30 complex exceptions. Only complex exceptions call the model; we assume 1.2 attempts on average (M2 retry path), so 36 calls per month.</p>
+<table>
+<tr><th>Paid model operation</th><th>Input tokens</th><th>Output tokens</th><th>Rate (Claude Opus 5.5)</th><th>Cost</th></tr>
+<tr><td>One exception-agent call</td><td>2,500 (system prompt, project record, 3 clauses, schema; the mock prompt measures about 3,200 characters, so production contracts are assumed longer)</td><td>1,000 (about 250 of JSON plus thinking at low effort)</td><td>$4 per million input, $20 per million output</td><td>$0.010 + $0.020 = <b>$0.030</b></td></tr>
+<tr><td>Per complex exception (1.2 attempts)</td><td colspan="3"></td><td><b>$0.036</b></td></tr>
+<tr><td>Per completed task: one billing period (600 projects, 36 calls)</td><td colspan="3"></td><td><b>$1.08</b>, or $0.0018 per project</td></tr>
+</table>
+<table>
+<tr><th>Monthly cost (estimate)</th><th>Amount</th><th>Basis</th></tr>
+<tr><td>Model calls</td><td>$1</td><td>36 calls × $0.030. At 10× the volume and 5× the output tokens: about $40</td></tr>
+<tr><td>Compute (2 workers, review app, intake API, scheduler)</td><td>$60</td><td>small containers, mostly idle outside period close</td></tr>
+<tr><td>Managed PostgreSQL with backups</td><td>$50</td><td>smallest production tier</td></tr>
+<tr><td>Logs, metrics, object storage</td><td>$20</td><td>7-year retention for billing records</td></tr>
+<tr><td>Supervisor review time</td><td>$450</td><td>90 exceptions × 6 min = 9 h at $50/h loaded (target ≤ 25 h per cycle)</td></tr>
+<tr><td>AR manager escalations and sign-off</td><td>$100</td><td>about 2 h per month</td></tr>
+<tr><td><b>Total</b></td><td><b>about $680</b></td><td>versus about $2,000 for manual QC of 600 projects (40 h at 4 min each)</td></tr>
+</table>
+<p><b>Strongest cost-saving opportunity.</b> People time, not tokens, dominates. Once the rules-engine path shows a supervisor override rate under 2% for three cycles, simple exceptions could move from approval before execution to later audit of a 20% sample. That saves about 5 hours, or $240, per month. The trade-off is that it relaxes M1 Decision 3: a wrong rule would reach draft invoices until the next audit, with only the AR manager's sign-off in the way. On the token side, the Batch API (50% off) or Claude Sonnet 5.5 ($2/$10) would save under $1 a month, which is not worth any loss of quality.</p>
+
+<h3>Latency and reliability</h3>
+<table>
+<tr><th style="width:26%">Item</th><th>Target or limit</th></tr>
+<tr><td>Completion time users need</td><td>Draft invoices within 3 days of period close (M1 target, baseline 15 days). Automated part of a run under 15 minutes for 600 projects; review window 48 h; AR escalation within the third day</td></tr>
+<tr><td>Model call</td><td>120 s timeout, 3 attempts, then the item goes to the supervisor with no recommendation. Never blocks other projects</td></tr>
+<tr><td>Invoicing System API</td><td>30 s timeout, 3 attempts with 2/4/8 s backoff on the same key, lookup after any timeout; then held for the AR manager</td></tr>
+<tr><td>Timer</td><td>Every 15 minutes: expire reviews, report held or unknown commits</td></tr>
+<tr><td>Service unavailable</td><td>LLM down: exceptions reach the supervisor without a recommendation. Invoicing down: the load is held with its key; nothing is re-sent under a new key. Source extract missing: run stops and the supervisor is notified. Database down: workers stop; every external call is preceded by a saved intent, so a restart resumes safely</td></tr>
+</table>
+
+<h3>Operational records</h3>
+<p>Each row in <code>execution_log</code> carries the <b>run id</b>, step, actor (code, model or human), status and timestamp, plus the <b>event id</b>, <b>review id</b>, <b>content version</b>, <b>reviewer and role</b>, model attempt and token usage, and the <b>idempotency key</b> and <b>external invoice id</b> where relevant. Together with <code>event_receipts</code> (every delivery, including duplicates) and the receiver's own request log, this reconstructs any run. Alerts in production: a review pending for more than 24 h, any run in <code>commit_held</code> or outcome unknown for more than 1 h, a model failure rate above 10% in a run, a spike in duplicate or refused events, and monthly model spend above budget.</p>
+
+<h2>7. Team, AI use and remaining limitation</h2>
+<table>
+<tr><th style="width:22%">Member</th><th>Individual contribution to M3</th></tr>
+<tr><td>Chad Driver</td><td><span class="ph">[to be filled in by the team]</span></td></tr>
+<tr><td>Jorja Baker</td><td><span class="ph">[to be filled in by the team]</span></td></tr>
+<tr><td>Minh Pham</td><td><span class="ph">[to be filled in by the team]</span></td></tr>
+<tr><td>Sao Lognon</td><td><span class="ph">[to be filled in by the team]</span></td></tr>
+<tr><td>Yohanes Teka</td><td><span class="ph">[to be filled in by the team]</span></td></tr>
+</table>
+<p><b>AI-use disclosure.</b> Claude (Anthropic), through Claude Code, drafted the M3 code changes, tests, diagrams and this report from the team's M1 and M2 documents and design notes (checkpoint records, recovery paths, reliability review). <span class="ph">[Team: list any other tools used.]</span> The team must review every section before submission. Verification: the test suite and the four report cases were run and their output is in the repository; cost figures are estimates from stated assumptions and published API prices, not measured usage.</p>
+<p><b>Most important remaining limitation.</b> The checkpoint makes sure a person decides, but nothing yet shows whether the agent's recommendation is right. Without a labeled set of complex cases, its confidence is uncalibrated and citation accuracy is unmeasured, and the live model path has not run with a real key. A busy reviewer could approve a wrong but well-argued number, as P-102 shows. Building that labeled set, and measuring supervisor override rates on it, is the next priority.</p>
+<p class="note">Credentials and private data: none are in the repository or this report. The API key is read from the environment, and all data is synthetic.</p>
+
+</body>
+</html>
